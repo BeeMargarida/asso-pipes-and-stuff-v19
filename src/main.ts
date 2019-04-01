@@ -10,6 +10,11 @@ class Message {
     static none = new Message(null)
 }
 
+
+class AsyncQueue {
+       
+}
+
 // class Concatenate implements Filter{
 //     constructor(public readonly a: Filter, public readonly b: Filter) { }
 
