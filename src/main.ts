@@ -46,6 +46,7 @@ class AsyncSemaphore<T> {
         this.count++;
 
         if (this.promiseResolverQueue.length > 0) {
+            this.count--;
             this.promiseResolverQueue.shift()(true)
         }
     }
