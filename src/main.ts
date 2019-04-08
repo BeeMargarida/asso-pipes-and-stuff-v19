@@ -1,117 +1,146 @@
-import { readFileSync, fstat } from 'fs'
+class AQSubscriber<T> {
+    constructor(public name: string) { }
 
-interface Filter {
-    next(): Message
-    hasNext(): Boolean
-}
-
-class Message {
-    constructor(public readonly value: any) { }
-    static none = new Message(null)
-}
-
-// class Concatenate implements Filter{
-//     constructor(public readonly a: Filter, public readonly b: Filter) { }
-
-//     do(): Message {
-//         return new Message(this.a.do().value.toString() + this.b.do().value.toString())
-//     }
-// }
-
-// class ConstantString implements Filter {
-//     constructor(public readonly c: string) {}
-
-//     do(): Message {
-//         return new Message(this.c)
-//     }
-// }
-
-class ToUpperCase implements Filter {
-    constructor(public readonly f: Filter) { }
-    next(): Message {
-       return new Message(this.f.next().value.toUpperCase())
-    }
-
-    hasNext(): Boolean {
-        return this.f.hasNext()
+    async pull(queue: Queue<T>): Promise<void> {
+        queue.dequeue().then(res => console.log(this.name + " " + res))
     }
 }
 
-class Writer implements Filter {
-    constructor(public readonly f: Filter) { }
-    next(): Message {
-        console.log(this.f.next().value.toString())
-        return Message.none
-    }
-
-    hasNext(): Boolean {
-        return this.f.hasNext()
+class AQPublisher<T> {
+    async push(queue: Queue<T>, arg: T): Promise<void> {
+        queue.enqueue(arg);
     }
 }
 
-class FileLineReader implements Filter {
-    lines: string[]
-    constructor(public readonly fileName: string) {
-        this.lines = readFileSync(fileName, 'utf-8').split('\n')
+abstract class Queue<T> {
+    abstract enqueue(arg: T): void
+    abstract dequeue(): Promise<T>
+}
+
+class AsyncQueue<T> extends Queue<T> {
+    public queue: Array<T> = new Array()
+    protected queuedPromises: Array<any> = new Array()
+
+    async enqueue(arg: T): Promise<void> {
+        if (this.queuedPromises.length > 0)
+            this.queuedPromises.shift()(arg)
+        else
+            this.queue.push(arg)
     }
 
-    next(): Message {
-        return new Message(this.lines.shift())
-    }
-
-    hasNext(): Boolean {
-        return this.lines.length > 0
+    async dequeue(): Promise<T> {
+        if (this.queue.length > 0)
+            return Promise.resolve(this.queue.shift())
+        else
+            return new Promise(res => this.queuedPromises.push(res))
     }
 }
 
-class SlowFileLineReader extends FileLineReader {
-    constructor(public readonly fileName: string) {
-        super(fileName)
-    }  
+class AsyncSemaphore<T> {
+    private promiseResolverQueue: Array<(v: boolean) => void> = []
 
-    delay(millis: number) {
-        const date = new Date()
-        let curDate = null
-        do { 
-            curDate = new Date() 
-        } while (curDate.getTime() - date.getTime() < millis)
+    constructor(private count: number) {}
+
+    signal(): void {
+        //se houver promises em espera, quando o count aumentar tem de a resolver
+        this.count++;
+
+        if (this.promiseResolverQueue.length > 0) {
+            this.count--;
+            this.promiseResolverQueue.shift()(true)
+        }
     }
 
-    next(): Message {
-        this.delay(2000)
-        return new Message(this.lines.shift())
-    }
-}
-
-class Join implements Filter {
-    fs: Filter[]
-    currentFilter = 0
-
-    constructor(...fs: Filter[]) { 
-        this.fs = fs
-    }
-
-    next(): Message {
-        const f = this.fs[this.currentFilter]
-        this.currentFilter = (this.currentFilter + 1) % this.fs.length
-        if (f.hasNext()) return f.next()
-        else return this.next()
-    }
-
-    hasNext(): Boolean {
-        return this.fs.filter(f => f.hasNext()).length > 0
+    async wait(): Promise<boolean> {
+        //if (count == 0) tem de arranjar maneira de ficar à espera que o count aumente (promise)
+        //se já houver alguma promise em espera, não pode passar à frente das outras promises
+        if (this.count == 0 || this.promiseResolverQueue.length > 0)
+            return new Promise<boolean>(res => this.promiseResolverQueue.push(res))
+        this.count--;
     }
 }
 
-function iterate(f: Filter) {
-    while(f.hasNext()) { 
-        f.next()
-    }  
+class UnboundedAsyncQueue<T> extends Queue<T> {
+    public queue: Array<T> = new Array()
+    // protected queuedPromises: Array<any> = new Array()
+    private sem: AsyncSemaphore<T> = new AsyncSemaphore<T>(0)
+
+    async enqueue(arg: T): Promise<void> {
+        this.queue.push(arg)
+        this.sem.signal()
+    }
+
+    async dequeue(): Promise<T> {
+        await this.sem.wait()
+        return this.queue.shift()
+    }
 }
 
-const f1 = new SlowFileLineReader('./best15.txt')
-const f2 = new FileLineReader('./best-mieic.txt')
+class BoundedAsyncQueue<T> extends Queue<T> {
+    private size: number = 10
+    public queue: Array<T> = new Array()
+    // protected queuedPromises: Array<any> = new Array()
+    private enqueueSem: AsyncSemaphore<T> = new AsyncSemaphore<T>(0)
+    private dequeueSem: AsyncSemaphore<T> = new AsyncSemaphore<T>(this.size)
 
-const r1 = new Writer(new ToUpperCase(new Join(f1, f2)))
+    async enqueue(arg: T): Promise<void> {
+        await this.dequeueSem.wait()
+        this.queue.push(arg)
+        this.enqueueSem.signal()
+    }
 
-iterate(r1)
+    async dequeue(): Promise<T> {
+        await this.enqueueSem.wait()
+        this.dequeueSem.signal()
+        return this.queue.shift()
+    }
+}
+
+async function ex1() {    //1 publisher, 1 subscriber, works async
+    let queue = new AsyncQueue()
+    let p1 = new AQPublisher()
+    let s1 = new AQSubscriber('s1')
+    s1.pull(queue)
+    p1.push(queue, 'ola')
+}
+
+async function ex2() {    //1 publisher, 3 subscribers, each takes 1 message from queue
+    let queue = new AsyncQueue()
+    let p1 = new AQPublisher()
+    let s1 = new AQSubscriber('s1')
+    let s2 = new AQSubscriber('s2')
+    let s3 = new AQSubscriber('s3')
+    s1.pull(queue)
+    s2.pull(queue)
+    s3.pull(queue)
+    p1.push(queue, 'ola')
+    p1.push(queue, 'ola')
+    p1.push(queue, 'ola')
+}
+
+async function ex3() {    //1 publisher, multiple subscribers, with semaphore and unboundedQueue
+    let queue = new UnboundedAsyncQueue()
+    let p1 = new AQPublisher()
+    let s1 = new AQSubscriber('s1')
+    let s2 = new AQSubscriber('s2')
+    let s3 = new AQSubscriber('s3')
+    s1.pull(queue)
+    s2.pull(queue)
+    s3.pull(queue)
+    p1.push(queue, 'ola')
+}
+
+async function ex4() {    //1 publisher, multiple subscribers, with semaphore and boundedQueue
+    let queue = new BoundedAsyncQueue()
+    let p1 = new AQPublisher()
+    let s1 = new AQSubscriber('s1')
+    let s2 = new AQSubscriber('s2')
+    let s3 = new AQSubscriber('s3')
+    s1.pull(queue)
+    s2.pull(queue)
+    s3.pull(queue)
+    p1.push(queue, 'ola')
+    p1.push(queue, 'ola')
+    p1.push(queue, 'ola')
+    p1.push(queue, 'ola')
+}
