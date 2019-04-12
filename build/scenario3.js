@@ -73,7 +73,7 @@ class SubscriptionManager {
     }
 }
 class AsyncSemaphore3 {
-    constructor(count) {
+    constructor(count = 0) {
         this.count = count;
         this.promiseResolverQueue = [];
     }

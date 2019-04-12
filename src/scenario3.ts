@@ -63,7 +63,7 @@ class SubscriptionManager<T> {
 class AsyncSemaphore3<T> {
     private promiseResolverQueue: Array<(v: boolean) => void> = []
 
-    constructor(private count: number) {}
+    constructor(private count: number = 0) {}
 
     signal(): void {
         //se houver promises em espera, quando o count aumentar tem de a resolver
@@ -100,3 +100,4 @@ broker.pull();
 p1.push(queue, 'ola')
 p1.push(queue, 'ola1')
 p1.push(queue, 'ola2')
+
